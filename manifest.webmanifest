@@ -1,0 +1,12 @@
+{
+  "name": "Sumo Volley",
+  "short_name": "Sumo Volley",
+  "start_url": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#2b1d3a",
+  "theme_color": "#f59e6b",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
