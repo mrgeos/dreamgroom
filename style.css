@@ -104,6 +104,11 @@ button + button {
   box-shadow: 0 4px 0 #1f438c;
 }
 
+button.online {
+  background: #2f8a5b;
+  box-shadow: 0 4px 0 #1d5e3c;
+}
+
 button.secondary {
   background: #7a6a5c;
   box-shadow: 0 4px 0 #52463c;
@@ -172,5 +177,113 @@ button small {
 @media (orientation: portrait) and (pointer: coarse) {
   #rotate {
     display: flex;
+  }
+}
+
+.note {
+  margin: 10px 0 0;
+  min-height: 1em;
+  font-size: 14px;
+  font-weight: 700;
+  color: #b3261e;
+}
+
+.note:empty {
+  display: none;
+}
+
+.game-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin: 10px 0;
+}
+
+.game-list button {
+  min-width: 0;
+  font-size: 17px;
+  padding: 10px 16px;
+  background: #2f8a5b;
+  box-shadow: 0 4px 0 #1d5e3c;
+}
+
+.join {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin: 8px 0 0;
+}
+
+.join input {
+  width: 120px;
+  padding: 10px 12px;
+  border: 2px solid #c7b49c;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 4px;
+  text-align: center;
+  text-transform: uppercase;
+  color: #3b2415;
+  background: #fff;
+}
+
+.join input:focus-visible,
+button:focus-visible {
+  outline: 3px solid #f4c430;
+  outline-offset: 2px;
+}
+
+.join button {
+  min-width: 0;
+}
+
+.code {
+  letter-spacing: 8px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (max-height: 460px) {
+  .panel {
+    padding: 12px 18px;
+  }
+
+  h2 {
+    margin-bottom: 8px;
+    font-size: 26px;
+  }
+
+  button {
+    padding: 8px 18px;
+    font-size: 17px;
+  }
+
+  .rules {
+    margin-top: 8px;
+    font-size: 13px;
+  }
+
+  .game-list {
+    margin: 6px 0;
+  }
+
+  .join input {
+    padding: 6px 10px;
+    font-size: 17px;
+  }
+
+  .big-score {
+    margin-bottom: 10px;
+    font-size: 36px;
   }
 }

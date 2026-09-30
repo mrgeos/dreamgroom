@@ -24,7 +24,9 @@
       <div class="buttons">
         <button data-mode="1">1 игрок<small>против бота</small></button>
         <button data-mode="2">2 игрока<small>на одном телефоне</small></button>
+        <button id="onlineBtn" class="online hidden">Онлайн<small>с друзьями</small></button>
       </div>
+      <p id="menuNote" class="note" role="status"></p>
       <p class="rules">
         Отбивайте мяч телом на сторону соперника. Мяч коснулся земли — очко сопернику.
         Не больше 3 касаний на своей стороне. Игра до 11 очков.
@@ -33,6 +35,38 @@
         <b>Управление:</b> палец на своей половине экрана — ведите влево/вправо, чтобы двигаться;
         свайп вверх или тап — прыжок. Клавиатура: A / D / W и ← / → / ↑.
       </p>
+    </div>
+  </div>
+
+  <div id="online" class="overlay hidden">
+    <div class="panel">
+      <h2>Онлайн</h2>
+      <div class="buttons">
+        <button id="createBtn" type="button">Создать игру</button>
+      </div>
+      <p class="rules">Или присоединитесь к игре друга:</p>
+      <div id="gameList" class="game-list"></div>
+      <form id="joinForm" class="join">
+        <label for="codeInput" class="visually-hidden">Код игры</label>
+        <input id="codeInput" maxlength="4" placeholder="КОД" autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <button type="submit">Войти</button>
+      </form>
+      <p id="onlineError" class="note" role="status"></p>
+      <p class="rules">Друзья открывают эту же страницу у себя. Сначала поделитесь ею через меню Share.</p>
+      <div class="buttons">
+        <button id="onlineBack" type="button" class="secondary">Назад</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="wait" class="overlay hidden">
+    <div class="panel">
+      <h2 id="waitTitle"></h2>
+      <p id="waitCode" class="big-score code"></p>
+      <p id="waitText" class="rules"></p>
+      <div class="buttons">
+        <button id="waitCancel" type="button" class="secondary">Отмена</button>
+      </div>
     </div>
   </div>
 
@@ -50,6 +84,7 @@
     <div class="panel">
       <h2 id="overTitle"></h2>
       <p id="overScore" class="big-score"></p>
+      <p id="overNote" class="rules hidden">Новую партию начинает создатель игры.</p>
       <div class="buttons">
         <button id="againBtn">Ещё раз</button>
         <button id="overMenuBtn" class="secondary">В меню</button>

@@ -123,8 +123,9 @@ const players = [makePlayer(0), makePlayer(1)];
 const ball = { x: 0, y: 0, vx: 0, vy: 0, rot: 0, frozen: false };
 
 const game = {
-  screen: 'menu',   // menu | play | over
-  vsBot: true,
+  screen: 'menu',   // menu | wait | play | over
+  mode: 'bot',      // bot | local | host | guest
+  mySide: 0,        // сторона этого устройства (-1 — зритель или оба игрока)
   paused: false,
   phase: 'serve',   // serve | rally | point
   phaseT: 0,
@@ -136,6 +137,7 @@ const game = {
   msgT: 0,
   hintT: 0,
   time: 0,
+  hits: 0,
 };
 
 const bot = { err: 0, reactT: 0 };
@@ -170,8 +172,9 @@ function startServe() {
   bot.err = (Math.random() - 0.5) * 40;
 }
 
-function startMatch(vsBot) {
-  game.vsBot = vsBot;
+function startMatch(mode) {
+  game.mode = mode;
+  game.mySide = mode === 'local' ? -1 : 0;
   game.score = [0, 0];
   game.server = Math.random() < 0.5 ? 0 : 1;
   game.screen = 'play';
@@ -184,7 +187,8 @@ function startMatch(vsBot) {
 }
 
 function sideName(side) {
-  if (game.vsBot) return side === 0 ? 'Вы' : 'Бот';
+  if (game.mode === 'bot') return side === 0 ? 'Вы' : 'Бот';
+  if (game.mySide >= 0 && game.mode !== 'local') return side === game.mySide ? 'Вы' : 'Соперник';
   return COLORS[side].name;
 }
 
@@ -215,8 +219,8 @@ const JOY_FULL = 45;
 const JOY_UP = 40;
 
 function pointerSide(clientX) {
-  if (game.vsBot) return 0;
-  return clientX < cw / 2 ? 0 : 1;
+  if (game.mode === 'local') return clientX < cw / 2 ? 0 : 1;
+  return game.mySide;
 }
 
 canvas.addEventListener('pointerdown', (e) => {
@@ -225,6 +229,7 @@ canvas.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   canvas.setPointerCapture?.(e.pointerId);
   const side = pointerSide(e.clientX);
+  if (side < 0) return;
   pointers.set(e.pointerId, {
     side, sx: e.clientX, sy: e.clientY, x: e.clientX, y: e.clientY,
     t: performance.now(), moved: 0,
@@ -248,7 +253,10 @@ canvas.addEventListener('pointermove', (e) => {
 function endPointer(e) {
   const p = pointers.get(e.pointerId);
   if (!p) return;
-  if (performance.now() - p.t < 250 && p.moved < 15) tapJump[p.side] = 0.15;
+  if (performance.now() - p.t < 250 && p.moved < 15) {
+    if (game.mode === 'guest') net.tapSeq++;
+    else tapJump[p.side] = 0.15;
+  }
   pointers.delete(e.pointerId);
 }
 canvas.addEventListener('pointerup', endPointer);
@@ -259,6 +267,8 @@ const keys = new Set();
 window.addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (e.code === 'Escape' || e.code === 'KeyP') togglePause();
+  // короткое нажатие прыжка у гостя может не успеть уйти по сети — шлём как тап
+  if (game.mode === 'guest' && !e.repeat && ['ArrowUp', 'KeyW', 'Space'].includes(e.code)) net.tapSeq++;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
@@ -270,7 +280,12 @@ function readInput(side) {
   const left = side === 0 ? ['KeyA'] : ['ArrowLeft'];
   const right = side === 0 ? ['KeyD'] : ['ArrowRight'];
   const up = side === 0 ? ['KeyW'] : ['ArrowUp'];
-  if (side === 0 && game.vsBot) {
+  if (game.mode !== 'local') {
+    left.push('KeyA');
+    right.push('KeyD');
+    up.push('KeyW');
+  }
+  if (game.mode !== 'local') {
     left.push('ArrowLeft');
     right.push('ArrowRight');
     up.push('ArrowUp', 'Space');
@@ -412,6 +427,7 @@ function collideBallPlayer(p) {
   }
   ball.vx = vx;
   ball.vy = vy;
+  game.hits++;
   sfx.hit(Math.min(sp, B_MAX_SPEED));
   registerTouch(p);
 }
@@ -486,7 +502,10 @@ function step(dt) {
   for (let s = 0; s < 2; s++) tapJump[s] = Math.max(0, tapJump[s] - dt);
 
   players.forEach((p) => {
-    const inp = p.side === 1 && game.vsBot ? botInput(p, dt) : readInput(p.side);
+    let inp;
+    if (p.side === 1 && game.mode === 'bot') inp = botInput(p, dt);
+    else if (p.side === 1 && game.mode === 'host') inp = net.remoteInput();
+    else inp = readInput(p.side);
     p.move = inp.move;
     p.jump = inp.jump;
     updatePlayer(p, dt);
@@ -798,7 +817,9 @@ function drawHud() {
 
   if (game.hintT > 0) {
     ctx.globalAlpha = Math.min(1, game.hintT);
-    const sides = game.vsBot ? [W * 0.25] : [W * 0.25, W * 0.75];
+    const sides = game.mode === 'local' ? [W * 0.25, W * 0.75]
+      : game.mySide >= 0 ? [game.mySide === 0 ? W * 0.25 : W * 0.75] : [];
+    if (game.mode === 'guest' && game.mySide < 0) drawText('Вы смотрите игру', NET_X, 420, 34, '#fff');
     for (const x of sides) {
       drawText('← → ведите пальцем', x, 420, 30, '#fff');
       drawText('↑ свайп / тап — прыжок', x, 462, 30, '#fff');
@@ -845,7 +866,9 @@ function render() {
 // Экраны и кнопки
 // ---------------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
-const overlays = { menu: $('menu'), pause: $('pause'), over: $('over') };
+const overlays = {
+  menu: $('menu'), online: $('online'), wait: $('wait'), pause: $('pause'), over: $('over'),
+};
 const pauseBtn = $('pauseBtn');
 
 function showOverlay(name) {
@@ -870,34 +893,50 @@ function togglePause(force) {
   showOverlay(game.paused ? 'pause' : null);
 }
 
+function overTitle(winner) {
+  if (game.mode === 'bot') return winner === 0 ? 'Победа! 🏆' : 'Бот победил';
+  if (game.mode !== 'local' && game.mySide >= 0) {
+    return winner === game.mySide ? 'Победа! 🏆' : 'Соперник победил';
+  }
+  return `${COLORS[winner].name} победил! 🏆`;
+}
+
+function showOver(winner) {
+  $('overTitle').textContent = overTitle(winner);
+  $('overScore').textContent = `${game.score[0]} : ${game.score[1]}`;
+  // в онлайне новую партию начинает создатель игры
+  $('againBtn').classList.toggle('hidden', game.mode === 'guest');
+  $('overNote').classList.toggle('hidden', game.mode !== 'guest');
+  showOverlay('over');
+}
+
 function endMatch(winner) {
   game.screen = 'over';
   pointers.clear();
-  const title = game.vsBot
-    ? (winner === 0 ? 'Победа! 🏆' : 'Бот победил')
-    : `${COLORS[winner].name} победил! 🏆`;
-  $('overTitle').textContent = title;
-  $('overScore').textContent = `${game.score[0]} : ${game.score[1]}`;
-  showOverlay('over');
+  showOver(winner);
   sfx.win();
+}
+
+function toMenu() {
+  net.leave();
+  game.screen = 'menu';
+  game.mode = 'bot';
+  game.mySide = 0;
+  game.paused = false;
+  resetDemo();
+  showOverlay('menu');
 }
 
 document.querySelectorAll('#menu button[data-mode]').forEach((btn) => {
   btn.addEventListener('click', () => {
     ensureAudio();
     goFullscreen();
-    startMatch(btn.dataset.mode === '1');
+    startMatch(btn.dataset.mode === '1' ? 'bot' : 'local');
   });
 });
 pauseBtn.addEventListener('click', () => togglePause(true));
 $('resumeBtn').addEventListener('click', () => togglePause(false));
-$('againBtn').addEventListener('click', () => startMatch(game.vsBot));
-const toMenu = () => {
-  game.screen = 'menu';
-  game.paused = false;
-  resetDemo();
-  showOverlay('menu');
-};
+$('againBtn').addEventListener('click', () => startMatch(game.mode));
 $('pauseMenuBtn').addEventListener('click', toMenu);
 $('overMenuBtn').addEventListener('click', toMenu);
 
@@ -916,6 +955,340 @@ function resetDemo() {
 resetDemo();
 
 // ---------------------------------------------------------------------------
+// Онлайн (claude.ai, capability `room`)
+//
+// Создатель игры (host, красный) считает физику и публикует состояние в своём
+// presence. Гость (синий) публикует только своё управление и рисует
+// полученное состояние. Остальные вошедшие в ту же игру смотрят.
+// ---------------------------------------------------------------------------
+const CODE_ABC = 'abcdefghjkmnpqrstuvwxyz23456789';
+const PHASES = ['serve', 'rally', 'point'];
+
+const net = {
+  room: null,       // лобби: все, у кого открыта страница
+  chan: null,       // комната конкретной игры
+  code: '',
+  opp: null,        // host: peer соперника
+  hostPeer: null,   // guest: peer создателя
+  lastTap: 0,       // host: последний номер тапа гостя
+  tapSeq: 0,        // guest: номер своего тапа
+  sentIn: '',
+  lastSt: null,
+  target: null,
+  recvT: 0,
+  lastHits: 0,
+  lastScreen: 0,
+  unsubs: [],
+  joinTimer: 0,
+
+  async init() {
+    const use = window.claude && window.claude.use;
+    if (!use) return;
+    let room = null;
+    try {
+      room = await window.claude.use('room');
+    } catch (e) {
+      room = null;
+    }
+    if (!room) return;
+    this.room = room;
+    $('onlineBtn').classList.remove('hidden');
+    room.onPeers(() => this.renderLobby(), () => $('onlineBtn').classList.add('hidden'));
+  },
+
+  async joinChan(code) {
+    try {
+      return await this.room.join('sumo-' + code);
+    } catch (e) {
+      return this.room; // без именованных комнат — общее лобби, игры различаются кодом
+    }
+  },
+
+  gamePeers() {
+    return (this.chan ? this.chan.peers() : []).filter((p) => p.presence && p.presence.g === this.code);
+  },
+
+  renderLobby() {
+    if (overlays.online.classList.contains('hidden')) return;
+    const list = $('gameList');
+    const codes = [];
+    for (const p of this.room.peers()) {
+      const c = p.presence && p.presence.open;
+      if (!p.sameTab && typeof c === 'string' && /^[a-z0-9]{4}$/.test(c) && !codes.includes(c)) codes.push(c);
+    }
+    list.replaceChildren();
+    if (!codes.length) {
+      const empty = document.createElement('p');
+      empty.className = 'rules';
+      empty.textContent = 'Открытых игр пока нет. Создайте свою или введите код.';
+      list.append(empty);
+    }
+    for (const c of codes) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = 'Игра ' + c.toUpperCase();
+      b.addEventListener('click', () => this.joinGame(c));
+      list.append(b);
+    }
+  },
+
+  showWait(title, code, text) {
+    game.screen = 'wait';
+    $('waitTitle').textContent = title;
+    $('waitCode').textContent = code ? code.toUpperCase() : '';
+    $('waitText').textContent = text;
+    showOverlay('wait');
+  },
+
+  async createGame() {
+    ensureAudio();
+    goFullscreen();
+    let code = '';
+    for (let i = 0; i < 4; i++) code += CODE_ABC[Math.floor(Math.random() * CODE_ABC.length)];
+    this.code = code;
+    game.mode = 'host';
+    game.mySide = 0;
+    this.showWait('Ждём соперника…', code, 'Скажите другу этот код или попросите выбрать игру в списке.');
+    this.chan = await this.joinChan(code);
+    if (game.mode !== 'host' || this.code !== code) return;
+    this.chan.presence({ g: code, role: 'host', st: null, in: null }).catch(() => {});
+    this.room.presence({ open: code }).catch(() => {});
+    this.unsubs.push(this.chan.onPeers(() => this.hostPeers()));
+  },
+
+  hostPeers() {
+    const peers = this.gamePeers();
+    if (this.opp && !peers.some((p) => p.peer === this.opp)) {
+      this.opp = null;
+      this.showWait('Соперник вышел', this.code, 'Ждём нового соперника с этим кодом.');
+      this.room.presence({ open: this.code }).catch(() => {});
+    }
+    if (!this.opp) {
+      const g = peers.find((p) => !p.sameTab && p.presence.role === 'guest');
+      if (g) {
+        this.opp = g.peer;
+        const inp = g.presence.in;
+        this.lastTap = Array.isArray(inp) ? +inp[2] || 0 : 0;
+        this.room.presence({ open: null }).catch(() => {});
+        startMatch('host');
+      }
+    }
+  },
+
+  remoteInput() {
+    const p = this.gamePeers().find((x) => x.peer === this.opp);
+    const inp = p && p.presence.in;
+    if (!Array.isArray(inp)) return { move: 0, jump: false };
+    const move = Math.max(-1, Math.min(1, +inp[0] || 0));
+    let jump = inp[1] === 1;
+    const tap = +inp[2] || 0;
+    if (tap !== this.lastTap) {
+      this.lastTap = tap;
+      tapJump[1] = 0.15;
+    }
+    if (tapJump[1] > 0) jump = true;
+    return { move, jump };
+  },
+
+  packState() {
+    const r = Math.round;
+    const pl = (p) => [r(p.x), r(p.y), r(p.vx), r(p.vy), +p.squash.toFixed(2), p.onGround ? 1 : 0];
+    return {
+      sc: game.screen === 'over' ? 1 : game.paused ? 2 : 0,
+      p: [pl(players[0]), pl(players[1])],
+      b: [r(ball.x), r(ball.y), r(ball.vx), r(ball.vy), +ball.rot.toFixed(2), ball.frozen ? 1 : 0],
+      s: [game.score[0], game.score[1], PHASES.indexOf(game.phase), game.server,
+        game.touchSide, game.touchCount, +game.msgT.toFixed(2)],
+      m: game.msg.slice(0, 80),
+      h: game.hits,
+      opp: this.opp,
+    };
+  },
+
+  hostFrame() {
+    if (!this.chan || !this.opp || game.screen === 'wait') return;
+    this.chan.presence({ st: this.packState() }).catch(() => {});
+  },
+
+  async joinGame(code) {
+    code = String(code || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 4);
+    if (code.length !== 4) {
+      $('codeInput').focus();
+      return;
+    }
+    ensureAudio();
+    goFullscreen();
+    this.code = code;
+    game.mode = 'guest';
+    game.mySide = 1;
+    this.hostPeer = null;
+    this.lastSt = null;
+    this.target = null;
+    this.showWait('Подключаемся…', code, '');
+    this.chan = await this.joinChan(code);
+    if (game.mode !== 'guest' || this.code !== code) return;
+    this.sentIn = '';
+    this.chan.presence({ g: code, role: 'guest', in: [0, 0, this.tapSeq], st: null }).catch(() => {});
+    this.unsubs.push(this.chan.onPeers(() => this.guestPeers()));
+    clearTimeout(this.joinTimer);
+    this.joinTimer = setTimeout(() => {
+      if (game.mode === 'guest' && !this.hostPeer) {
+        this.leave();
+        game.mode = 'bot';
+        showOverlay('online');
+        this.renderLobby();
+        $('onlineError').textContent = `Игра ${code.toUpperCase()} не найдена.`;
+      }
+    }, 8000);
+  },
+
+  guestPeers() {
+    const host = this.gamePeers().find((p) => p.presence.role === 'host');
+    if (host) {
+      this.hostPeer = host.peer;
+      if (game.screen === 'wait' && !this.lastSt) {
+        this.showWait('Ждём начала…', this.code, 'Создатель игры сейчас играет с другим соперником — вы будете смотреть.');
+      }
+    } else if (this.hostPeer) {
+      toMenu();
+      $('menuNote').textContent = 'Создатель игры вышел.';
+    }
+  },
+
+  guestFrame(dt, now) {
+    const host = this.gamePeers().find((p) => p.peer === this.hostPeer);
+    const st = host && host.presence.st;
+    if (st && typeof st === 'object' && st !== this.lastSt) {
+      this.lastSt = st;
+      this.recvT = now;
+      this.applyState(st);
+    }
+    if (this.target) this.smooth(dt, now);
+
+    // своё управление -> presence
+    if (game.mySide === 1 && game.screen === 'play' && !game.paused) {
+      const inp = readInput(1);
+      const msg = [Math.round(inp.move * 20) / 20, inp.jump ? 1 : 0, this.tapSeq];
+      const key = msg.join(',');
+      if (key !== this.sentIn) {
+        this.sentIn = key;
+        this.chan.presence({ in: msg }).catch(() => {});
+      }
+    }
+  },
+
+  applyState(st) {
+    if (!Array.isArray(st.p) || !Array.isArray(st.b) || !Array.isArray(st.s)) return;
+    const num = (v) => (Number.isFinite(+v) ? +v : 0);
+    game.mySide = st.opp === this.myPeer() ? 1 : -1;
+    const first = !this.target;
+    this.target = { p: st.p.map((a) => a.map(num)), b: st.b.map(num) };
+    const s = st.s.map(num);
+    const prevSum = game.score[0] + game.score[1];
+    game.score = [s[0], s[1]];
+    game.phase = PHASES[s[2]] || 'rally';
+    game.server = s[3];
+    game.touchSide = s[4];
+    game.touchCount = s[5];
+    game.msgT = s[6];
+    game.msg = typeof st.m === 'string' ? st.m.slice(0, 80) : '';
+    if (!first && game.score[0] + game.score[1] > prevSum) sfx.point();
+    const hits = num(st.h);
+    if (!first && hits > this.lastHits) sfx.hit(700);
+    this.lastHits = hits;
+
+    const sc = num(st.sc);
+    if (sc === 2) {
+      game.msg = 'Пауза';
+      game.msgT = 1;
+    }
+    if (sc === 1 && game.screen !== 'over') {
+      game.screen = 'over';
+      pointers.clear();
+      showOver(game.score[0] > game.score[1] ? 0 : 1);
+      sfx.win();
+    } else if (sc !== 1 && game.screen !== 'play') {
+      game.screen = 'play';
+      game.paused = false;
+      game.hintT = 5;
+      pointers.clear();
+      showOverlay(null);
+      this.snap();
+    }
+  },
+
+  myPeer() {
+    const me = this.chan && this.chan.peers().find((p) => p.sameTab);
+    return me ? me.peer : null;
+  },
+
+  snap() {
+    if (!this.target) return;
+    players.forEach((p, i) => {
+      [p.x, p.y] = this.target.p[i];
+    });
+    [ball.x, ball.y] = this.target.b;
+  },
+
+  smooth(dt, now) {
+    const t = this.target;
+    const age = Math.min(0.12, (now - this.recvT) / 1000);
+    const k = 1 - Math.exp(-dt * 25);
+    players.forEach((p, i) => {
+      const [x, y, vx, vy, sq, gr] = t.p[i];
+      const tx = x + vx * age;
+      const ty = gr ? y : Math.min(GROUND - P_R, y + vy * age + 0.5 * P_GRAVITY * age * age);
+      if (Math.hypot(tx - p.x, ty - p.y) > 250) { p.x = tx; p.y = ty; }
+      p.x += (tx - p.x) * k;
+      p.y += (ty - p.y) * k;
+      p.squash = sq;
+      p.onGround = gr === 1;
+    });
+    const [bx, by, bvx, bvy, rot, frozen] = t.b;
+    const a = frozen ? 0 : age;
+    const tx = bx + bvx * a;
+    const ty = Math.min(GROUND - B_R, by + bvy * a + 0.5 * B_GRAVITY * a * a);
+    if (Math.hypot(tx - ball.x, ty - ball.y) > 250) { ball.x = tx; ball.y = ty; }
+    ball.x += (tx - ball.x) * k;
+    ball.y += (ty - ball.y) * k;
+    ball.rot = rot;
+  },
+
+  leave() {
+    clearTimeout(this.joinTimer);
+    this.unsubs.forEach((u) => u());
+    this.unsubs = [];
+    if (this.chan) {
+      if (this.chan !== this.room) this.chan.leave().catch(() => {});
+      else this.room.presence({ g: null, role: null, st: null, in: null }).catch(() => {});
+    }
+    if (this.room) this.room.presence({ open: null }).catch(() => {});
+    this.chan = null;
+    this.code = '';
+    this.opp = null;
+    this.hostPeer = null;
+    this.lastSt = null;
+    this.target = null;
+  },
+};
+
+$('onlineBtn').addEventListener('click', () => {
+  $('onlineError').textContent = '';
+  $('menuNote').textContent = '';
+  showOverlay('online');
+  net.renderLobby();
+});
+$('createBtn').addEventListener('click', () => net.createGame());
+$('joinForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  net.joinGame($('codeInput').value);
+});
+$('onlineBack').addEventListener('click', () => showOverlay('menu'));
+$('waitCancel').addEventListener('click', toMenu);
+
+net.init();
+
+// ---------------------------------------------------------------------------
 // Главный цикл
 // ---------------------------------------------------------------------------
 let last = performance.now();
@@ -925,16 +1298,23 @@ function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
 
-  const running = game.screen === 'play' && !game.paused && !isPortraitTouch();
-  if (running) {
-    acc += dt;
-    while (acc >= STEP) {
-      step(STEP);
-      acc -= STEP;
-      if (game.screen !== 'play') break;
-    }
+  if (game.mode === 'guest') {
+    net.guestFrame(dt, now);
+    game.hintT = Math.max(0, game.hintT - dt);
+    game.msgT = Math.max(0, game.msgT - dt);
   } else {
-    acc = 0;
+    const running = game.screen === 'play' && !game.paused && !isPortraitTouch();
+    if (running) {
+      acc += dt;
+      while (acc >= STEP) {
+        step(STEP);
+        acc -= STEP;
+        if (game.screen !== 'play') break;
+      }
+    } else {
+      acc = 0;
+    }
+    if (game.mode === 'host') net.hostFrame();
   }
 
   render();

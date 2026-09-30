@@ -7,6 +7,11 @@ Plain HTML5 Canvas + JavaScript, no dependencies and no build step.
 
 - **1 player**: against a bot.
 - **2 players**: on one phone; each player controls their own half of the screen.
+- **Online**: with friends on different phones. Available only when the game is opened
+  as a page on claude.ai (it uses the page's `room` capability). One player creates
+  a game and gets a 4-letter code; the other picks the game from the list or enters
+  the code. Anyone else who joins with the same code watches. The creator's phone
+  runs the physics; the opponent's phone sends only its controls.
 - The phone is held in landscape.
 
 Controls:
