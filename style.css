@@ -253,6 +253,36 @@ button:focus-visible {
   white-space: nowrap;
 }
 
+button.secondary + button.secondary {
+  background: #7a6a5c;
+  box-shadow: 0 4px 0 #52463c;
+}
+
+.log-panel {
+  width: min(760px, 100%);
+  text-align: left;
+}
+
+.log-panel h2,
+.log-panel .rules {
+  text-align: center;
+}
+
+.log-text {
+  max-height: 40vh;
+  overflow: auto;
+  margin: 10px 0 12px;
+  padding: 10px;
+  border-radius: 10px;
+  background: #2b1d3a;
+  color: #f5ecdf;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 @media (max-height: 460px) {
   .panel {
     padding: 12px 18px;

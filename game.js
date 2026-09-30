@@ -210,13 +210,24 @@ function checkWinner() {
 }
 
 // ---------------------------------------------------------------------------
-// Управление: касания (виртуальный джойстик на своей половине) и клавиатура
+// Управление: зоны касания и клавиатура.
+// Нижняя часть экрана — движение (левая половина зоны ←, правая →),
+// верхняя — прыжок. В игре вдвоём на одном телефоне у каждого своя половина.
 // ---------------------------------------------------------------------------
-const pointers = new Map(); // pointerId -> { side, sx, sy, x, y, t, moved }
+const pointers = new Map(); // pointerId -> { side, x, y }
 const tapJump = [0, 0];     // время «импульса» прыжка от тапа
-const JOY_DEAD = 8;
-const JOY_FULL = 45;
-const JOY_UP = 40;
+const JUMP_ZONE = 0.4;      // верхние 40% экрана — прыжок
+
+function zoneOf(side) {
+  if (game.mode === 'local') return side === 0 ? [0, cw / 2] : [cw / 2, cw];
+  return [0, cw];
+}
+
+function touchAction(p) {
+  if (p.y < ch * JUMP_ZONE) return 'jump';
+  const [x0, x1] = zoneOf(p.side);
+  return p.x < (x0 + x1) / 2 ? 'left' : 'right';
+}
 
 function pointerSide(clientX) {
   if (game.mode === 'local') return clientX < cw / 2 ? 0 : 1;
@@ -230,33 +241,24 @@ canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture?.(e.pointerId);
   const side = pointerSide(e.clientX);
   if (side < 0) return;
-  pointers.set(e.pointerId, {
-    side, sx: e.clientX, sy: e.clientY, x: e.clientX, y: e.clientY,
-    t: performance.now(), moved: 0,
-  });
+  const p = { side, x: e.clientX, y: e.clientY };
+  pointers.set(e.pointerId, p);
+  // короткий тап по зоне прыжка не должен теряться
+  if (touchAction(p) === 'jump') {
+    if (game.mode === 'guest') net.tapSeq++;
+    else tapJump[side] = 0.15;
+  }
 });
 
 canvas.addEventListener('pointermove', (e) => {
   const p = pointers.get(e.pointerId);
   if (!p) return;
   e.preventDefault();
-  p.moved = Math.max(p.moved, Math.hypot(e.clientX - p.sx, e.clientY - p.sy));
   p.x = e.clientX;
   p.y = e.clientY;
-  // джойстик «тянется» за пальцем, чтобы смена направления была быстрой
-  const dx = p.x - p.sx;
-  if (Math.abs(dx) > JOY_FULL) p.sx = p.x - Math.sign(dx) * JOY_FULL;
-  const dy = p.y - p.sy;
-  if (dy > JOY_UP) p.sy = p.y - JOY_UP;
 });
 
 function endPointer(e) {
-  const p = pointers.get(e.pointerId);
-  if (!p) return;
-  if (performance.now() - p.t < 250 && p.moved < 15) {
-    if (game.mode === 'guest') net.tapSeq++;
-    else tapJump[p.side] = 0.15;
-  }
   pointers.delete(e.pointerId);
 }
 canvas.addEventListener('pointerup', endPointer);
@@ -294,16 +296,15 @@ function readInput(side) {
   if (right.some((k) => keys.has(k))) move += 1;
   if (up.some((k) => keys.has(k))) jump = true;
 
-  // последний активный палец этой стороны
-  let ptr = null;
-  for (const p of pointers.values()) if (p.side === side) ptr = p;
-  if (ptr) {
-    const dx = ptr.x - ptr.sx;
-    if (Math.abs(dx) > JOY_DEAD) {
-      move = Math.max(-1, Math.min(1, (dx - Math.sign(dx) * JOY_DEAD) / (JOY_FULL - JOY_DEAD)));
-    }
-    if (ptr.sy - ptr.y > JOY_UP) jump = true;
+  // пальцы этой стороны: можно держать движение и одновременно жать прыжок
+  let touchMove = 0;
+  for (const p of pointers.values()) {
+    if (p.side !== side) continue;
+    const a = touchAction(p);
+    if (a === 'jump') jump = true;
+    else touchMove = a === 'left' ? -1 : 1; // последний палец главнее
   }
+  if (touchMove) move = touchMove;
   if (tapJump[side] > 0) jump = true;
 
   return { move, jump };
@@ -821,28 +822,57 @@ function drawHud() {
       : game.mySide >= 0 ? [game.mySide === 0 ? W * 0.25 : W * 0.75] : [];
     if (game.mode === 'guest' && game.mySide < 0) drawText('Вы смотрите игру', NET_X, 420, 34, '#fff');
     for (const x of sides) {
-      drawText('← → ведите пальцем', x, 420, 30, '#fff');
-      drawText('↑ свайп / тап — прыжок', x, 462, 30, '#fff');
+      if (isTouch) continue; // на телефоне подсказки нарисованы прямо на зонах
+      const kb = game.mode === 'local' ? (x < NET_X ? 'A / D / W' : '← / → / ↑') : '← / → / ↑  или  A / D / W';
+      drawText(kb, x, 420, 30, '#fff');
+      drawText('движение и прыжок', x, 462, 30, '#fff');
     }
     ctx.globalAlpha = 1;
   }
 }
 
-function drawJoysticks() {
-  for (const p of pointers.values()) {
-    const c = COLORS[p.side].belt;
-    ctx.globalAlpha = 0.35;
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 3;
-    circle(p.sx, p.sy, JOY_FULL + 12);
+const isTouch = window.matchMedia('(pointer: coarse)').matches;
+
+function drawTouchZones() {
+  if (game.screen !== 'play' || game.paused || game.mySide < 0 && game.mode !== 'local') return;
+  if (!isTouch && game.hintT <= 0) return;
+  const sides = game.mode === 'local' ? [0, 1] : [game.mySide];
+  const jy = ch * JUMP_ZONE;
+  const base = game.hintT > 0 ? 0.5 : 0.14;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 2;
+  for (const side of sides) {
+    const [x0, x1] = zoneOf(side);
+    const mid = (x0 + x1) / 2;
+    const active = new Set();
+    for (const p of pointers.values()) if (p.side === side) active.add(touchAction(p));
+
+    // подсветка нажатых зон
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    if (active.has('jump')) ctx.fillRect(x0, 0, x1 - x0, jy);
+    if (active.has('left')) ctx.fillRect(x0, jy, mid - x0, ch - jy);
+    if (active.has('right')) ctx.fillRect(mid, jy, x1 - mid, ch - jy);
+
+    // границы зон
+    ctx.strokeStyle = `rgba(255,255,255,${base})`;
+    ctx.setLineDash([8, 10]);
+    ctx.beginPath();
+    ctx.moveTo(x0 + 12, jy);
+    ctx.lineTo(x1 - 12, jy);
+    ctx.moveTo(mid, jy + 12);
+    ctx.lineTo(mid, ch - 12);
     ctx.stroke();
-    ctx.globalAlpha = 0.55;
-    ctx.fillStyle = c;
-    const dx = Math.max(-JOY_FULL, Math.min(JOY_FULL, p.x - p.sx));
-    const dy = Math.max(-JOY_UP - 10, Math.min(JOY_UP, p.y - p.sy));
-    circle(p.sx + dx, p.sy + dy, 22);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+
+    // подписи
+    const size = Math.max(18, Math.min(34, ch * 0.07));
+    ctx.font = `900 ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
+    ctx.fillStyle = `rgba(255,255,255,${Math.min(1, base + 0.2)})`;
+    const ly = jy + (ch - jy) * 0.72;
+    ctx.fillText('◀', (x0 + mid) / 2, ly);
+    ctx.fillText('▶', (mid + x1) / 2, ly);
+    ctx.fillText('▲ прыжок', mid, jy * 0.62);
   }
 }
 
@@ -859,7 +889,7 @@ function render() {
   if (game.screen !== 'menu') drawHud();
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  drawJoysticks();
+  drawTouchZones();
 }
 
 // ---------------------------------------------------------------------------
@@ -867,7 +897,7 @@ function render() {
 // ---------------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
 const overlays = {
-  menu: $('menu'), online: $('online'), wait: $('wait'), pause: $('pause'), over: $('over'),
+  menu: $('menu'), online: $('online'), wait: $('wait'), pause: $('pause'), over: $('over'), log: $('log'),
 };
 const pauseBtn = $('pauseBtn');
 
@@ -962,6 +992,18 @@ resetDemo();
 // полученное состояние. Остальные вошедшие в ту же игру смотрят.
 // ---------------------------------------------------------------------------
 const CODE_ABC = 'abcdefghjkmnpqrstuvwxyz23456789';
+
+const ERRORS = {
+  'NET-404': { text: 'Игра {code} не найдена: проверьте код или попросите друга создать игру заново.' },
+  'NET-409': { text: 'Не получилось занять код игры. Попробуйте создать игру ещё раз.' },
+  'NET-SRV': { text: 'Нет связи с сервером подключения (0.peerjs.com). Проверьте интернет; возможно, сеть или VPN его блокирует.' },
+  'NET-SRV-TIMEOUT': { text: 'Сервер подключения (0.peerjs.com) не ответил за 20 секунд. Попробуйте ещё раз или другую сеть.' },
+  'NET-P2P': { text: 'Игра найдена, но телефоны не смогли соединиться напрямую. Частая причина — мобильный интернет: подключите оба телефона к Wi-Fi.' },
+  'NET-RTC': { text: 'Ошибка WebRTC в браузере. Откройте ссылку в Safari или Chrome, а не во встроенном браузере мессенджера.' },
+  'NET-BROWSER': { text: 'Этот браузер не поддерживает прямое соединение. Откройте ссылку в Safari или Chrome.' },
+  'NET-LOST': { text: 'Связь с создателем игры потеряна.' },
+  'NET-UNKNOWN': { text: 'Не удалось подключиться.' },
+};
 const PEERJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js';
 const PEER_PREFIX = 'sumovolley-v1-';
 const PEER_OPTS = {
@@ -984,12 +1026,76 @@ function loadScript(src) {
   });
 }
 
+// Журнал подключения: показывается игроку и копируется для отладки.
+const netLog = {
+  lines: [],
+  add(msg) {
+    const line = `${new Date().toISOString().slice(11, 23)} ${msg}`;
+    this.lines.push(line);
+    if (this.lines.length > 400) this.lines.shift();
+    if (window.console) console.log('[net]', msg);
+  },
+  env() {
+    const c = navigator.connection || {};
+    this.add(`env: ${navigator.userAgent}`);
+    this.add(`env: online=${navigator.onLine} net=${c.effectiveType || '?'}/${c.type || '?'} ` +
+      `webrtc=${typeof RTCPeerConnection !== 'undefined'} url=${location.origin}${location.pathname}`);
+  },
+  text() {
+    return this.lines.join('\n');
+  },
+};
+
+const errType = (err) => (err && (err.type || err.name)) || 'unknown';
+const errMsg = (err) => (err && err.message ? String(err.message).slice(0, 200) : '');
+
+// Следим за WebRTC-соединением: какие адреса нашлись (host/srflx/relay)
+// и чем закончился ICE — это главное, что нужно для разбора проблем.
+function watchIce(conn, label, onFailed) {
+  let tries = 0;
+  const hook = () => {
+    const pc = conn.peerConnection;
+    if (!pc) {
+      if (tries++ < 50) setTimeout(hook, 100);
+      return;
+    }
+    const kinds = new Set();
+    pc.addEventListener('icecandidate', (e) => {
+      if (e.candidate && e.candidate.candidate) {
+        const m = / typ (\w+)/.exec(e.candidate.candidate);
+        const kind = m ? m[1] : '?';
+        if (!kinds.has(kind)) {
+          kinds.add(kind);
+          netLog.add(`${label}: найден свой адрес типа ${kind}`);
+        }
+      } else if (!e.candidate) {
+        netLog.add(`${label}: сбор адресов завершён (${[...kinds].join(',') || 'нет'})`);
+      }
+    });
+    pc.addEventListener('iceconnectionstatechange', () => {
+      netLog.add(`${label}: ICE ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === 'failed' && onFailed) onFailed();
+    });
+    pc.addEventListener('connectionstatechange', () => netLog.add(`${label}: соединение ${pc.connectionState}`));
+  };
+  hook();
+}
+
 // Комната поверх WebRTC (PeerJS) с тем же интерфейсом, что и у `room`:
 // presence / peers / onPeers / leave. Создатель игры — узел с id по коду,
 // остальные подключаются к нему напрямую.
-function p2pJoin(code, role) {
+function p2pJoin(code, role, onIssue) {
   return new Promise((resolve, reject) => {
-    const peer = role === 'host' ? new Peer(PEER_PREFIX + code, PEER_OPTS) : new Peer(PEER_OPTS);
+    netLog.add(`${role}: старт, код ${code.toUpperCase()}, сервер ${PEER_OPTS.host || '0.peerjs.com'}`);
+    let stage = 'server'; // server -> p2p -> ok
+    let peer;
+    try {
+      peer = role === 'host' ? new Peer(PEER_PREFIX + code, PEER_OPTS) : new Peer(PEER_OPTS);
+    } catch (e) {
+      netLog.add(`${role}: не удалось создать Peer: ${errType(e)} ${errMsg(e)}`);
+      reject({ type: 'browser-incompatible', message: errMsg(e) });
+      return;
+    }
     const conns = new Map(); // peer id -> { conn, presence }
     const listeners = new Set();
     let mine = {};
@@ -1017,6 +1123,7 @@ function p2pJoin(code, role) {
       }
     };
     const fail = (err) => {
+      netLog.add(`${role}: ошибка ${errType(err)} на этапе ${stage} ${errMsg(err)}`);
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -1024,9 +1131,9 @@ function p2pJoin(code, role) {
       window.removeEventListener('pagehide', bye);
       closed = true;
       try { peer.destroy(); } catch (e) { /* уже закрыт */ }
-      reject(err);
+      reject({ type: errType(err), message: errMsg(err), stage });
     };
-    const timer = setTimeout(() => fail({ type: 'timeout' }), 12000);
+    const timer = setTimeout(() => fail({ type: 'timeout' }), 20000);
     // WebRTC замечает пропажу соседа не сразу: шлём пульс и отключаем молчащих
     const beat = setInterval(() => {
       flush();
@@ -1071,13 +1178,22 @@ function p2pJoin(code, role) {
 
     const dropConn = (conn) => {
       if (conns.get(conn.peer)?.conn === conn) {
+        netLog.add(`${role}: соединение с ${conn.peer.slice(-6)} закрыто`);
         conns.delete(conn.peer);
         rebuild();
       }
     };
     const attach = (conn) => {
       conns.set(conn.peer, { conn, presence: null, seen: Date.now() });
+      const label = role === 'host' ? `host←${conn.peer.slice(-6)}` : 'guest→host';
+      netLog.add(`${label}: устанавливаем прямое соединение`);
+      watchIce(conn, label, () => {
+        if (role === 'guest') fail({ type: 'ice-failed' });
+        else if (onIssue) onIssue('NET-P2P');
+      });
       conn.on('open', () => {
+        netLog.add(`${label}: канал данных открыт`);
+        stage = 'ok';
         conn.send({ t: 'p', p: mine });
         if (role === 'guest' && !settled) {
           settled = true;
@@ -1094,11 +1210,15 @@ function p2pJoin(code, role) {
         }
       });
       conn.on('close', () => dropConn(conn));
-      conn.on('error', () => dropConn(conn));
+      conn.on('error', (e) => {
+        netLog.add(`${label}: ошибка канала ${errType(e)} ${errMsg(e)}`);
+        dropConn(conn);
+      });
     };
 
     peer.on('open', (id) => {
       myId = id;
+      netLog.add(`${role}: сервер подключения ответил, мой id …${id.slice(-6)}`);
       rebuild();
       if (settled) return; // переподключение к серверу
       if (role === 'host') {
@@ -1106,6 +1226,7 @@ function p2pJoin(code, role) {
         clearTimeout(timer);
         resolve(chan);
       } else {
+        stage = 'p2p';
         attach(peer.connect(PEER_PREFIX + code, { serialization: 'json' }));
       }
     });
@@ -1116,6 +1237,7 @@ function p2pJoin(code, role) {
     peer.on('error', (err) => fail(err));
     // сервер нужен только для новых подключений — возвращаемся к нему тихо
     peer.on('disconnected', () => {
+      netLog.add(`${role}: связь с сервером подключения потеряна${closed ? '' : ', переподключаемся'}`);
       if (!closed && settled) {
         try { peer.reconnect(); } catch (e) { /* попробуем позже */ }
       }
@@ -1167,9 +1289,11 @@ const net = {
     try {
       await loadScript(PEERJS_URL);
     } catch (e) {
+      netLog.add('не удалось загрузить PeerJS с cdnjs — онлайн недоступен');
       return;
     }
     if (!window.Peer) return;
+    netLog.env();
     this.room = p2pLobby;
     $('onlineBtn').classList.remove('hidden');
     $('gameList').classList.add('hidden');
@@ -1185,7 +1309,13 @@ const net = {
   },
 
   joinChan(code, role) {
-    if (this.room.p2p) return this.room.join(code, role);
+    if (this.room.p2p) {
+      return this.room.join(code, role, (issue) => {
+        if (game.mode === 'host' && game.screen === 'wait') {
+          $('waitText').textContent = `${ERRORS[issue].text} (${issue})`;
+        }
+      });
+    }
     return this.room.join('sumo-' + code).catch(() => this.room); // без именованных комнат — общее лобби
   },
 
@@ -1199,11 +1329,22 @@ const net = {
     $('onlineError').textContent = text;
   },
 
+  // Ошибка PeerJS -> код и понятный текст (коды — в ERRORS и README)
   errorText(err, code) {
-    const type = err && err.type;
-    if (type === 'peer-unavailable') return `Игра ${code.toUpperCase()} не найдена.`;
-    if (type === 'timeout') return 'Не удалось подключиться. Попробуйте другую сеть, например Wi-Fi.';
-    return 'Нет связи с сервером игры. Проверьте интернет и попробуйте ещё раз.';
+    const type = errType(err);
+    let key = 'NET-UNKNOWN';
+    if (type === 'peer-unavailable') key = 'NET-404';
+    else if (type === 'unavailable-id') key = 'NET-409';
+    else if (type === 'browser-incompatible') key = 'NET-BROWSER';
+    else if (type === 'ice-failed') key = 'NET-P2P';
+    else if (type === 'timeout') key = err.stage === 'p2p' ? 'NET-P2P' : 'NET-SRV-TIMEOUT';
+    else if (['network', 'socket-error', 'socket-closed', 'server-error', 'ssl-unavailable'].includes(type)) key = 'NET-SRV';
+    else if (type === 'webrtc') key = 'NET-RTC';
+    const text = ERRORS[key].text
+      .replace('{code}', code.toUpperCase())
+      .replace('0.peerjs.com', PEER_OPTS.host || '0.peerjs.com');
+    netLog.add(`итог: ${key} (${type}${err && err.stage ? ', этап ' + err.stage : ''})`);
+    return `${text} Код ошибки: ${key}${key === 'NET-UNKNOWN' ? ' / ' + type : ''}.`;
   },
 
   inviteUrl() {
@@ -1391,7 +1532,8 @@ const net = {
     clearTimeout(this.joinTimer);
     this.joinTimer = setTimeout(() => {
       if (game.mode === 'guest' && !this.hostPeer) {
-        this.onlineError(`Игра ${code.toUpperCase()} не найдена.`);
+        netLog.add('guest: создатель не появился за 8 секунд');
+        this.onlineError(this.errorText({ type: 'peer-unavailable' }, code));
       }
     }, 8000);
   },
@@ -1404,8 +1546,9 @@ const net = {
         this.showWait('Ждём начала…', this.code, 'Создатель игры сейчас играет с другим соперником — вы будете смотреть.');
       }
     } else if (this.hostPeer) {
+      netLog.add('guest: создатель игры пропал из комнаты');
       toMenu();
-      $('menuNote').textContent = 'Создатель игры вышел.';
+      $('menuNote').textContent = `${ERRORS['NET-LOST'].text} Код ошибки: NET-LOST.`;
     }
   },
 
@@ -1540,6 +1683,35 @@ $('joinForm').addEventListener('submit', (e) => {
 $('onlineBack').addEventListener('click', () => showOverlay('menu'));
 $('waitCancel').addEventListener('click', toMenu);
 $('shareBtn').addEventListener('click', () => net.share());
+
+// Журнал подключения
+let logReturn = 'online';
+function openLog(from) {
+  logReturn = from;
+  $('logText').textContent = netLog.text() || 'Журнал пуст: подключений ещё не было.';
+  $('logCopy').textContent = 'Скопировать';
+  showOverlay('log');
+}
+document.querySelectorAll('[data-open-log]').forEach((b) => {
+  b.addEventListener('click', () => openLog(b.dataset.openLog));
+});
+$('logClose').addEventListener('click', () => showOverlay(logReturn));
+$('logCopy').addEventListener('click', () => {
+  const text = netLog.text();
+  const done = () => { $('logCopy').textContent = 'Скопировано'; };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done, () => selectLog());
+  } else {
+    selectLog();
+  }
+});
+function selectLog() {
+  const r = document.createRange();
+  r.selectNodeContents($('logText'));
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
 
 net.init();
 

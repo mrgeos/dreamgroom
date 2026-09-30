@@ -32,8 +32,9 @@
         Не больше 3 касаний на своей стороне. Игра до 11 очков.
       </p>
       <p class="rules">
-        <b>Управление:</b> палец на своей половине экрана — ведите влево/вправо, чтобы двигаться;
-        свайп вверх или тап — прыжок. Клавиатура: A / D / W и ← / → / ↑.
+        <b>Управление:</b> нижняя часть экрана — движение (слева ◀, справа ▶),
+        верхняя — прыжок. Вдвоём на одном телефоне у каждого своя половина экрана.
+        Клавиатура: A / D / W и ← / → / ↑.
       </p>
     </div>
   </div>
@@ -55,6 +56,7 @@
       <p id="onlineHint" class="rules">Друзья открывают эту же страницу у себя. Сначала поделитесь ею через меню Share.</p>
       <div class="buttons">
         <button id="onlineBack" type="button" class="secondary">Назад</button>
+        <button type="button" class="secondary" data-open-log="online">Журнал подключения</button>
       </div>
     </div>
   </div>
@@ -67,6 +69,19 @@
       <div class="buttons">
         <button id="shareBtn" type="button" class="online hidden">Отправить ссылку</button>
         <button id="waitCancel" type="button" class="secondary">Отмена</button>
+        <button type="button" class="secondary" data-open-log="wait">Журнал</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="log" class="overlay hidden">
+    <div class="panel log-panel">
+      <h2>Журнал подключения</h2>
+      <p class="rules">Если не получается сыграть, скопируйте журнал и пришлите его вместе с кодом ошибки.</p>
+      <pre id="logText" class="log-text"></pre>
+      <div class="buttons">
+        <button id="logCopy" type="button" class="online">Скопировать</button>
+        <button id="logClose" type="button" class="secondary">Закрыть</button>
       </div>
     </div>
   </div>
