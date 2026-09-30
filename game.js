@@ -962,6 +962,174 @@ resetDemo();
 // полученное состояние. Остальные вошедшие в ту же игру смотрят.
 // ---------------------------------------------------------------------------
 const CODE_ABC = 'abcdefghjkmnpqrstuvwxyz23456789';
+const PEERJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js';
+const PEER_PREFIX = 'sumovolley-v1-';
+const PEER_OPTS = {
+  ...(window.SUMO_PEER_SERVER || {}), // для тестов с локальным сервером PeerJS
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+    ],
+  },
+};
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.onload = resolve;
+    el.onerror = reject;
+    document.head.append(el);
+  });
+}
+
+// Комната поверх WebRTC (PeerJS) с тем же интерфейсом, что и у `room`:
+// presence / peers / onPeers / leave. Создатель игры — узел с id по коду,
+// остальные подключаются к нему напрямую.
+function p2pJoin(code, role) {
+  return new Promise((resolve, reject) => {
+    const peer = role === 'host' ? new Peer(PEER_PREFIX + code, PEER_OPTS) : new Peer(PEER_OPTS);
+    const conns = new Map(); // peer id -> { conn, presence }
+    const listeners = new Set();
+    let mine = {};
+    let myId = null;
+    let snap = [];
+    let settled = false;
+    let closed = false;
+    let sendTimer = 0;
+
+    const rebuild = () => {
+      snap = [{ peer: myId, presence: mine, sameTab: true, isMe: true }];
+      for (const [id, c] of conns) {
+        if (c.presence) snap.push({ peer: id, presence: c.presence, sameTab: false, isMe: false });
+      }
+      listeners.forEach((f) => f());
+    };
+    const flush = () => {
+      sendTimer = 0;
+      for (const c of conns.values()) {
+        if (c.conn.open) {
+          try {
+            c.conn.send({ t: 'p', p: mine });
+          } catch (e) { /* соединение закрывается */ }
+        }
+      }
+    };
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(beat);
+      window.removeEventListener('pagehide', bye);
+      closed = true;
+      try { peer.destroy(); } catch (e) { /* уже закрыт */ }
+      reject(err);
+    };
+    const timer = setTimeout(() => fail({ type: 'timeout' }), 12000);
+    // WebRTC замечает пропажу соседа не сразу: шлём пульс и отключаем молчащих
+    const beat = setInterval(() => {
+      flush();
+      const now = Date.now();
+      for (const c of conns.values()) {
+        if (now - c.seen > 5000) {
+          try { c.conn.close(); } catch (e) { /* уже закрыто */ }
+          dropConn(c.conn);
+        }
+      }
+    }, 1000);
+    const bye = () => chan.leave();
+    window.addEventListener('pagehide', bye);
+
+    const chan = {
+      presence(patch) {
+        mine = { ...mine };
+        for (const k of Object.keys(patch)) {
+          if (patch[k] === null) delete mine[k];
+          else mine[k] = patch[k];
+        }
+        rebuild();
+        if (!sendTimer) sendTimer = setTimeout(flush, 16);
+        return Promise.resolve();
+      },
+      peers: () => snap,
+      onPeers(f) {
+        listeners.add(f);
+        setTimeout(() => listeners.has(f) && f(), 0);
+        return () => listeners.delete(f);
+      },
+      leave() {
+        closed = true;
+        clearTimeout(sendTimer);
+        clearInterval(beat);
+        window.removeEventListener('pagehide', bye);
+        listeners.clear();
+        try { peer.destroy(); } catch (e) { /* уже закрыт */ }
+        return Promise.resolve();
+      },
+    };
+
+    const dropConn = (conn) => {
+      if (conns.get(conn.peer)?.conn === conn) {
+        conns.delete(conn.peer);
+        rebuild();
+      }
+    };
+    const attach = (conn) => {
+      conns.set(conn.peer, { conn, presence: null, seen: Date.now() });
+      conn.on('open', () => {
+        conn.send({ t: 'p', p: mine });
+        if (role === 'guest' && !settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(chan);
+        }
+      });
+      conn.on('data', (d) => {
+        const c = conns.get(conn.peer);
+        if (c) c.seen = Date.now();
+        if (c && d && d.t === 'p' && d.p && typeof d.p === 'object') {
+          c.presence = d.p;
+          rebuild();
+        }
+      });
+      conn.on('close', () => dropConn(conn));
+      conn.on('error', () => dropConn(conn));
+    };
+
+    peer.on('open', (id) => {
+      myId = id;
+      rebuild();
+      if (settled) return; // переподключение к серверу
+      if (role === 'host') {
+        settled = true;
+        clearTimeout(timer);
+        resolve(chan);
+      } else {
+        attach(peer.connect(PEER_PREFIX + code, { serialization: 'json' }));
+      }
+    });
+    peer.on('connection', (conn) => {
+      if (role === 'host') attach(conn);
+      else conn.close();
+    });
+    peer.on('error', (err) => fail(err));
+    // сервер нужен только для новых подключений — возвращаемся к нему тихо
+    peer.on('disconnected', () => {
+      if (!closed && settled) {
+        try { peer.reconnect(); } catch (e) { /* попробуем позже */ }
+      }
+    });
+  });
+}
+
+const p2pLobby = {
+  p2p: true,
+  join: p2pJoin,
+  presence: () => Promise.resolve(),
+  peers: () => [],
+  onPeers: () => () => {},
+};
 const PHASES = ['serve', 'rally', 'point'];
 
 const net = {
@@ -982,25 +1150,83 @@ const net = {
   joinTimer: 0,
 
   async init() {
-    const use = window.claude && window.claude.use;
-    if (!use) return;
-    let room = null;
-    try {
-      room = await window.claude.use('room');
-    } catch (e) {
-      room = null;
+    // На claude.ai — capability `room`; на обычном сайте — WebRTC через PeerJS.
+    if (window.claude && window.claude.use) {
+      let room = null;
+      try {
+        room = await window.claude.use('room');
+      } catch (e) {
+        room = null;
+      }
+      if (!room) return;
+      this.room = room;
+      $('onlineBtn').classList.remove('hidden');
+      room.onPeers(() => this.renderLobby(), () => $('onlineBtn').classList.add('hidden'));
+      return;
     }
-    if (!room) return;
-    this.room = room;
+    try {
+      await loadScript(PEERJS_URL);
+    } catch (e) {
+      return;
+    }
+    if (!window.Peer) return;
+    this.room = p2pLobby;
     $('onlineBtn').classList.remove('hidden');
-    room.onPeers(() => this.renderLobby(), () => $('onlineBtn').classList.add('hidden'));
+    $('gameList').classList.add('hidden');
+    $('joinHint').textContent = 'Или введите код друга:';
+    $('onlineHint').textContent = 'Создайте игру и отправьте другу ссылку или код. Лучше играть через Wi-Fi.';
+
+    const params = new URLSearchParams(location.search);
+    const join = params.get('join');
+    if (join) {
+      history.replaceState(null, '', location.pathname);
+      this.joinGame(join);
+    }
   },
 
-  async joinChan(code) {
+  joinChan(code, role) {
+    if (this.room.p2p) return this.room.join(code, role);
+    return this.room.join('sumo-' + code).catch(() => this.room); // без именованных комнат — общее лобби
+  },
+
+  onlineError(text) {
+    this.leave();
+    game.mode = 'bot';
+    game.mySide = 0;
+    game.screen = 'menu';
+    showOverlay('online');
+    this.renderLobby();
+    $('onlineError').textContent = text;
+  },
+
+  errorText(err, code) {
+    const type = err && err.type;
+    if (type === 'peer-unavailable') return `Игра ${code.toUpperCase()} не найдена.`;
+    if (type === 'timeout') return 'Не удалось подключиться. Попробуйте другую сеть, например Wi-Fi.';
+    return 'Нет связи с сервером игры. Проверьте интернет и попробуйте ещё раз.';
+  },
+
+  inviteUrl() {
+    return `${location.origin}${location.pathname}?join=${this.code.toUpperCase()}`;
+  },
+
+  async share() {
+    const url = this.inviteUrl();
+    const text = `Сыграем в Sumo Volley! Код игры: ${this.code.toUpperCase()}`;
+    const btn = $('shareBtn');
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: 'Sumo Volley', text, url });
+        return;
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;
+      }
+    }
     try {
-      return await this.room.join('sumo-' + code);
+      await navigator.clipboard.writeText(url);
+      btn.textContent = 'Ссылка скопирована';
     } catch (e) {
-      return this.room; // без именованных комнат — общее лобби, игры различаются кодом
+      $('waitText').textContent = url;
     }
   },
 
@@ -1009,7 +1235,7 @@ const net = {
   },
 
   renderLobby() {
-    if (overlays.online.classList.contains('hidden')) return;
+    if (overlays.online.classList.contains('hidden') || !this.room || this.room.p2p) return;
     const list = $('gameList');
     const codes = [];
     for (const p of this.room.peers()) {
@@ -1043,14 +1269,35 @@ const net = {
   async createGame() {
     ensureAudio();
     goFullscreen();
-    let code = '';
-    for (let i = 0; i < 4; i++) code += CODE_ABC[Math.floor(Math.random() * CODE_ABC.length)];
-    this.code = code;
     game.mode = 'host';
     game.mySide = 0;
-    this.showWait('Ждём соперника…', code, 'Скажите другу этот код или попросите выбрать игру в списке.');
-    this.chan = await this.joinChan(code);
-    if (game.mode !== 'host' || this.code !== code) return;
+    const p2p = this.room.p2p;
+    $('shareBtn').classList.toggle('hidden', !p2p);
+    $('shareBtn').textContent = navigator.share ? 'Отправить ссылку' : 'Скопировать ссылку';
+    const hint = p2p
+      ? 'Отправьте другу ссылку или продиктуйте код.'
+      : 'Скажите другу этот код или попросите выбрать игру в списке.';
+    let code = '';
+    for (let attempt = 0; ; attempt++) {
+      code = '';
+      for (let i = 0; i < 4; i++) code += CODE_ABC[Math.floor(Math.random() * CODE_ABC.length)];
+      this.code = code;
+      this.showWait('Ждём соперника…', code, p2p ? 'Создаём игру…' : hint);
+      try {
+        this.chan = await this.joinChan(code, 'host');
+        break;
+      } catch (e) {
+        if (game.mode !== 'host') return;
+        if (e && e.type === 'unavailable-id' && attempt < 3) continue; // код занят — берём другой
+        this.onlineError(this.errorText(e, code));
+        return;
+      }
+    }
+    if (game.mode !== 'host' || this.code !== code) {
+      this.chan.leave();
+      return;
+    }
+    $('waitText').textContent = hint;
     this.chan.presence({ g: code, role: 'host', st: null, in: null }).catch(() => {});
     this.room.presence({ open: code }).catch(() => {});
     this.unsubs.push(this.chan.onPeers(() => this.hostPeers()));
@@ -1124,20 +1371,27 @@ const net = {
     this.hostPeer = null;
     this.lastSt = null;
     this.target = null;
+    $('shareBtn').classList.add('hidden');
     this.showWait('Подключаемся…', code, '');
-    this.chan = await this.joinChan(code);
-    if (game.mode !== 'guest' || this.code !== code) return;
+    let chan;
+    try {
+      chan = await this.joinChan(code, 'guest');
+    } catch (e) {
+      if (game.mode === 'guest' && this.code === code) this.onlineError(this.errorText(e, code));
+      return;
+    }
+    if (game.mode !== 'guest' || this.code !== code) {
+      chan.leave();
+      return;
+    }
+    this.chan = chan;
     this.sentIn = '';
     this.chan.presence({ g: code, role: 'guest', in: [0, 0, this.tapSeq], st: null }).catch(() => {});
     this.unsubs.push(this.chan.onPeers(() => this.guestPeers()));
     clearTimeout(this.joinTimer);
     this.joinTimer = setTimeout(() => {
       if (game.mode === 'guest' && !this.hostPeer) {
-        this.leave();
-        game.mode = 'bot';
-        showOverlay('online');
-        this.renderLobby();
-        $('onlineError').textContent = `Игра ${code.toUpperCase()} не найдена.`;
+        this.onlineError(`Игра ${code.toUpperCase()} не найдена.`);
       }
     }, 8000);
   },
@@ -1285,6 +1539,7 @@ $('joinForm').addEventListener('submit', (e) => {
 });
 $('onlineBack').addEventListener('click', () => showOverlay('menu'));
 $('waitCancel').addEventListener('click', toMenu);
+$('shareBtn').addEventListener('click', () => net.share());
 
 net.init();
 

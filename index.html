@@ -44,7 +44,7 @@
       <div class="buttons">
         <button id="createBtn" type="button">Создать игру</button>
       </div>
-      <p class="rules">Или присоединитесь к игре друга:</p>
+      <p id="joinHint" class="rules">Или присоединитесь к игре друга:</p>
       <div id="gameList" class="game-list"></div>
       <form id="joinForm" class="join">
         <label for="codeInput" class="visually-hidden">Код игры</label>
@@ -52,7 +52,7 @@
         <button type="submit">Войти</button>
       </form>
       <p id="onlineError" class="note" role="status"></p>
-      <p class="rules">Друзья открывают эту же страницу у себя. Сначала поделитесь ею через меню Share.</p>
+      <p id="onlineHint" class="rules">Друзья открывают эту же страницу у себя. Сначала поделитесь ею через меню Share.</p>
       <div class="buttons">
         <button id="onlineBack" type="button" class="secondary">Назад</button>
       </div>
@@ -65,6 +65,7 @@
       <p id="waitCode" class="big-score code"></p>
       <p id="waitText" class="rules"></p>
       <div class="buttons">
+        <button id="shareBtn" type="button" class="online hidden">Отправить ссылку</button>
         <button id="waitCancel" type="button" class="secondary">Отмена</button>
       </div>
     </div>

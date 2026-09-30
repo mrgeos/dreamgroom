@@ -7,11 +7,16 @@ Plain HTML5 Canvas + JavaScript, no dependencies and no build step.
 
 - **1 player**: against a bot.
 - **2 players**: on one phone; each player controls their own half of the screen.
-- **Online**: with friends on different phones. Available only when the game is opened
-  as a page on claude.ai (it uses the page's `room` capability). One player creates
-  a game and gets a 4-letter code; the other picks the game from the list or enters
-  the code. Anyone else who joins with the same code watches. The creator's phone
-  runs the physics; the opponent's phone sends only its controls.
+- **Online**: with friends on different phones. One player creates a game and gets a
+  4-letter code plus an invite link; the friend opens the link or enters the code.
+  Anyone else who joins with the same code watches. The creator's phone runs the
+  physics; the opponent's phone sends only its controls.
+  - On a regular website (GitHub Pages) phones connect directly over WebRTC.
+    PeerJS's free public server (`0.peerjs.com`) is used only to find each other.
+    No account needed. On some mobile networks a direct connection may fail;
+    Wi-Fi usually works.
+  - Opened as a page on claude.ai, it uses the page's `room` capability instead
+    and also lists open games.
 - The phone is held in landscape.
 
 Controls:
@@ -29,10 +34,9 @@ Open `index.html` in a browser, or serve the folder with any static server:
 python3 -m http.server 8000
 ```
 
-To play on a phone, enable GitHub Pages
-(Settings → Pages → Deploy from branch → `main` / root). The game will then be at
-`https://<user>.github.io/dreamgroom/`. In the browser you can use
-"Add to Home Screen" to launch it fullscreen like an app.
+The site is published with GitHub Pages from the `gh-pages` branch:
+<https://mrgeos.github.io/dreamgroom/>. To update it, push the new files to that branch.
+In the browser you can use "Add to Home Screen" to launch it fullscreen like an app.
 
 ## Files
 
