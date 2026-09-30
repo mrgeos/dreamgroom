@@ -996,16 +996,24 @@ const CODE_ABC = 'abcdefghjkmnpqrstuvwxyz23456789';
 const ERRORS = {
   'NET-404': { text: 'Игра {code} не найдена: проверьте код или попросите друга создать игру заново.' },
   'NET-409': { text: 'Не получилось занять код игры. Попробуйте создать игру ещё раз.' },
-  'NET-SRV': { text: 'Нет связи с сервером подключения (0.peerjs.com). Проверьте интернет; возможно, сеть или VPN его блокирует.' },
-  'NET-SRV-TIMEOUT': { text: 'Сервер подключения (0.peerjs.com) не ответил за 20 секунд. Попробуйте ещё раз или другую сеть.' },
-  'NET-P2P': { text: 'Игра найдена, но телефоны не смогли соединиться напрямую. Частая причина — мобильный интернет: подключите оба телефона к Wi-Fi.' },
+  'NET-SRV': { text: 'Нет связи ни с одним сервером игры (0.peerjs.com, HiveMQ, EMQX). Проверьте интернет; возможно, сеть или VPN их блокирует.' },
+  'NET-SRV-TIMEOUT': { text: 'Серверы игры не ответили за 15 секунд. Попробуйте ещё раз или другую сеть.' },
+  'NET-P2P': { text: 'Игра найдена, но телефоны не смогли соединиться напрямую (частая ситуация в мобильном интернете).' },
+  'NET-RELAY': { text: 'Серверы-посредники (HiveMQ, EMQX) тоже недоступны — возможно, их блокирует сеть или VPN. Попробуйте другую сеть.' },
   'NET-RTC': { text: 'Ошибка WebRTC в браузере. Откройте ссылку в Safari или Chrome, а не во встроенном браузере мессенджера.' },
   'NET-BROWSER': { text: 'Этот браузер не поддерживает прямое соединение. Откройте ссылку в Safari или Chrome.' },
   'NET-LOST': { text: 'Связь с создателем игры потеряна.' },
   'NET-UNKNOWN': { text: 'Не удалось подключиться.' },
 };
 const PEERJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js';
-const PEER_PREFIX = 'sumovolley-v1-';
+const MQTT_URL = 'https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js';
+// публичные бесплатные MQTT-брокеры (без регистрации) — запасной путь через сервер
+const RELAY_URLS = window.SUMO_RELAY_URLS || [
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://broker.emqx.io:8084/mqtt',
+];
+const RELAY_TOPIC = 'sumovolley/v1';
+const PEER_PREFIX = 'sumovolley-v2-';
 const PEER_OPTS = {
   ...(window.SUMO_PEER_SERVER || {}), // для тестов с локальным сервером PeerJS
   config: {
@@ -1081,74 +1089,131 @@ function watchIce(conn, label, onFailed) {
   hook();
 }
 
-// Комната поверх WebRTC (PeerJS) с тем же интерфейсом, что и у `room`:
-// presence / peers / onPeers / leave. Создатель игры — узел с id по коду,
-// остальные подключаются к нему напрямую.
-function p2pJoin(code, role, onIssue) {
+// Онлайн вне claude.ai: одна «комната» поверх двух путей сразу.
+//  1) Напрямую (WebRTC через PeerJS) — быстро, но в мобильных сетях часто не
+//     пробивается через NAT.
+//  2) Через сервер-посредник (публичные MQTT-брокеры по WSS) — работает почти
+//     везде, но с чуть большей задержкой.
+// Каждое сообщение шлётся по всем живым путям с номером; получатель берёт
+// самое свежее, поэтому сам собой используется самый быстрый путь.
+// Интерфейс как у `room`: presence / peers / onPeers / leave.
+function onlineJoin(code, role, onIssue) {
   return new Promise((resolve, reject) => {
-    netLog.add(`${role}: старт, код ${code.toUpperCase()}, сервер ${PEER_OPTS.host || '0.peerjs.com'}`);
-    let stage = 'server'; // server -> p2p -> ok
-    let peer;
-    try {
-      peer = role === 'host' ? new Peer(PEER_PREFIX + code, PEER_OPTS) : new Peer(PEER_OPTS);
-    } catch (e) {
-      netLog.add(`${role}: не удалось создать Peer: ${errType(e)} ${errMsg(e)}`);
-      reject({ type: 'browser-incompatible', message: errMsg(e) });
-      return;
-    }
-    const conns = new Map(); // peer id -> { conn, presence }
+    const cid = Math.random().toString(36).slice(2, 12);
+    const topicBase = `${RELAY_TOPIC}/${code}`;
+    const diag = {
+      peerServer: 'connecting', // connecting | ok | fail
+      peerUnavailable: false,
+      ice: '',
+      relays: RELAY_URLS.map(() => 'connecting'),
+      via: {},                  // peer -> 'p2p' | 'relay'
+      peerErr: null,
+    };
+    const peers = new Map();    // cid -> { presence, n, seen }
     const listeners = new Set();
     let mine = {};
-    let myId = null;
+    let seq = 0;
     let snap = [];
     let settled = false;
     let closed = false;
     let sendTimer = 0;
+    let peer = null;
+    const conns = new Set();    // открытые WebRTC-каналы
+    const relays = [];          // MQTT-клиенты
 
+    netLog.add(`${role}: старт, код ${code.toUpperCase()}, мой id ${cid}`);
+
+    const relayOk = () => diag.relays.includes('ok');
     const rebuild = () => {
-      snap = [{ peer: myId, presence: mine, sameTab: true, isMe: true }];
-      for (const [id, c] of conns) {
-        if (c.presence) snap.push({ peer: id, presence: c.presence, sameTab: false, isMe: false });
-      }
+      snap = [{ peer: cid, presence: mine, sameTab: true, isMe: true }];
+      for (const [id, e] of peers) snap.push({ peer: id, presence: e.presence, sameTab: false, isMe: false });
       listeners.forEach((f) => f());
     };
+    const packet = () => JSON.stringify({ t: 'p', id: cid, n: seq, p: mine });
     const flush = () => {
       sendTimer = 0;
-      for (const c of conns.values()) {
-        if (c.conn.open) {
-          try {
-            c.conn.send({ t: 'p', p: mine });
-          } catch (e) { /* соединение закрывается */ }
-        }
+      seq++;
+      const text = packet();
+      for (const c of conns) {
+        try { c.send(text); } catch (e) { /* канал закрывается */ }
+      }
+      for (const r of relays) {
+        if (r.connected) r.publish(`${topicBase}/${cid}`, text, { qos: 0 });
       }
     };
-    const fail = (err) => {
-      netLog.add(`${role}: ошибка ${errType(err)} на этапе ${stage} ${errMsg(err)}`);
+    const receive = (raw, via) => {
+      let d = raw;
+      if (typeof raw !== 'object' || raw instanceof Uint8Array) {
+        try { d = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw)); } catch (e) { return; }
+      }
+      if (!d || typeof d.id !== 'string' || d.id === cid) return;
+      if (d.t === 'bye') {
+        if (peers.delete(d.id)) {
+          netLog.add(`${role}: ${d.id} вышел`);
+          rebuild();
+        }
+        return;
+      }
+      if (d.t !== 'p' || !d.p || typeof d.p !== 'object') return;
+      const n = +d.n || 0;
+      let e = peers.get(d.id);
+      if (!e) {
+        e = { presence: {}, n: -1, seen: 0 };
+        peers.set(d.id, e);
+        netLog.add(`${role}: на связи ${d.id} (${d.p.role || '?'}) через ${via === 'p2p' ? 'прямое соединение' : 'сервер-посредник'}`);
+      }
+      e.seen = Date.now();
+      if (diag.via[d.id] !== via && n > e.n) {
+        if (diag.via[d.id]) netLog.add(`${role}: данные от ${d.id} теперь быстрее приходят ${via === 'p2p' ? 'напрямую' : 'через посредника'}`);
+        diag.via[d.id] = via;
+      }
+      if (n > e.n) {
+        e.n = n;
+        e.presence = d.p;
+        rebuild();
+      }
+    };
+
+    const done = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      clearInterval(beat);
-      window.removeEventListener('pagehide', bye);
-      closed = true;
-      try { peer.destroy(); } catch (e) { /* уже закрыт */ }
-      reject({ type: errType(err), message: errMsg(err), stage });
+      netLog.add(`${role}: подключены (прямое: ${diag.peerServer}, посредник: ${diag.relays.join('/')})`);
+      resolve(chan);
     };
-    const timer = setTimeout(() => fail({ type: 'timeout' }), 20000);
-    // WebRTC замечает пропажу соседа не сразу: шлём пульс и отключаем молчащих
+    const giveUp = (err) => {
+      if (settled) return;
+      settled = true;
+      netLog.add(`${role}: не удалось подключиться ни одним способом`);
+      chan.leave();
+      reject(err);
+    };
+    // все пути к серверам упали — сдаёмся
+    const checkAllFailed = () => {
+      if (settled) return;
+      if (diag.peerServer === 'fail' && diag.relays.every((r) => r === 'fail')) {
+        giveUp(diag.peerErr || { type: 'network' });
+      }
+    };
+    const timer = setTimeout(() => giveUp({ type: 'timeout', stage: 'server' }), 15000);
+
+    // пульс: даже без изменений шлём состояние раз в секунду; молчащих убираем
     const beat = setInterval(() => {
       flush();
       const now = Date.now();
-      for (const c of conns.values()) {
-        if (now - c.seen > 5000) {
-          try { c.conn.close(); } catch (e) { /* уже закрыто */ }
-          dropConn(c.conn);
+      let changed = false;
+      for (const [id, e] of peers) {
+        if (now - e.seen > 5000) {
+          peers.delete(id);
+          netLog.add(`${role}: ${id} молчит 5 секунд — считаем, что вышел`);
+          changed = true;
         }
       }
+      if (changed) rebuild();
     }, 1000);
-    const bye = () => chan.leave();
-    window.addEventListener('pagehide', bye);
 
     const chan = {
+      diag,
       presence(patch) {
         mine = { ...mine };
         for (const k of Object.keys(patch)) {
@@ -1156,7 +1221,8 @@ function p2pJoin(code, role, onIssue) {
           else mine[k] = patch[k];
         }
         rebuild();
-        if (!sendTimer) sendTimer = setTimeout(flush, 16);
+        // создатель шлёт состояние ~30 раз в секунду, гость — управление сразу
+        if (!sendTimer) sendTimer = setTimeout(flush, role === 'host' ? 33 : 10);
         return Promise.resolve();
       },
       peers: () => snap,
@@ -1166,88 +1232,168 @@ function p2pJoin(code, role, onIssue) {
         return () => listeners.delete(f);
       },
       leave() {
+        if (closed) return Promise.resolve();
         closed = true;
+        clearTimeout(timer);
         clearTimeout(sendTimer);
         clearInterval(beat);
         window.removeEventListener('pagehide', bye);
         listeners.clear();
-        try { peer.destroy(); } catch (e) { /* уже закрыт */ }
+        const text = JSON.stringify({ t: 'bye', id: cid });
+        for (const c of conns) {
+          try { c.send(text); } catch (e) { /* уже закрыт */ }
+        }
+        for (const r of relays) {
+          try {
+            if (r.connected) r.publish(`${topicBase}/${cid}`, text, { qos: 0 });
+            r.end(false);
+          } catch (e) { /* уже закрыт */ }
+        }
+        try { if (peer) peer.destroy(); } catch (e) { /* уже закрыт */ }
         return Promise.resolve();
       },
     };
+    const bye = () => chan.leave();
+    window.addEventListener('pagehide', bye);
 
-    const dropConn = (conn) => {
-      if (conns.get(conn.peer)?.conn === conn) {
-        netLog.add(`${role}: соединение с ${conn.peer.slice(-6)} закрыто`);
-        conns.delete(conn.peer);
-        rebuild();
-      }
-    };
+    // --- путь 1: WebRTC (PeerJS) ---
     const attach = (conn) => {
-      conns.set(conn.peer, { conn, presence: null, seen: Date.now() });
       const label = role === 'host' ? `host←${conn.peer.slice(-6)}` : 'guest→host';
       netLog.add(`${label}: устанавливаем прямое соединение`);
       watchIce(conn, label, () => {
-        if (role === 'guest') fail({ type: 'ice-failed' });
-        else if (onIssue) onIssue('NET-P2P');
+        diag.ice = 'failed';
+        netLog.add(`${label}: напрямую не соединиться — играем через сервер-посредник${relayOk() ? '' : ' (но он тоже недоступен)'}`);
+        if (role === 'host' && onIssue && !relayOk()) onIssue('NET-P2P');
       });
       conn.on('open', () => {
-        netLog.add(`${label}: канал данных открыт`);
-        stage = 'ok';
-        conn.send({ t: 'p', p: mine });
-        if (role === 'guest' && !settled) {
-          settled = true;
-          clearTimeout(timer);
-          resolve(chan);
-        }
+        diag.ice = 'connected';
+        netLog.add(`${label}: прямой канал открыт`);
+        conns.add(conn);
+        flush();
       });
-      conn.on('data', (d) => {
-        const c = conns.get(conn.peer);
-        if (c) c.seen = Date.now();
-        if (c && d && d.t === 'p' && d.p && typeof d.p === 'object') {
-          c.presence = d.p;
-          rebuild();
-        }
-      });
-      conn.on('close', () => dropConn(conn));
+      conn.on('data', (d) => receive(d, 'p2p'));
+      const drop = () => {
+        if (conns.delete(conn)) netLog.add(`${label}: прямой канал закрыт`);
+      };
+      conn.on('close', drop);
       conn.on('error', (e) => {
         netLog.add(`${label}: ошибка канала ${errType(e)} ${errMsg(e)}`);
-        dropConn(conn);
+        drop();
       });
     };
 
-    peer.on('open', (id) => {
-      myId = id;
-      netLog.add(`${role}: сервер подключения ответил, мой id …${id.slice(-6)}`);
-      rebuild();
-      if (settled) return; // переподключение к серверу
-      if (role === 'host') {
-        settled = true;
-        clearTimeout(timer);
-        resolve(chan);
-      } else {
-        stage = 'p2p';
-        attach(peer.connect(PEER_PREFIX + code, { serialization: 'json' }));
+    if (window.Peer) {
+      try {
+        peer = role === 'host' ? new Peer(PEER_PREFIX + code, PEER_OPTS) : new Peer(PEER_OPTS);
+      } catch (e) {
+        netLog.add(`p2p: не удалось создать Peer: ${errType(e)} ${errMsg(e)}`);
+        diag.peerServer = 'fail';
+        diag.peerErr = { type: 'browser-incompatible' };
       }
-    });
-    peer.on('connection', (conn) => {
-      if (role === 'host') attach(conn);
-      else conn.close();
-    });
-    peer.on('error', (err) => fail(err));
-    // сервер нужен только для новых подключений — возвращаемся к нему тихо
-    peer.on('disconnected', () => {
-      netLog.add(`${role}: связь с сервером подключения потеряна${closed ? '' : ', переподключаемся'}`);
-      if (!closed && settled) {
-        try { peer.reconnect(); } catch (e) { /* попробуем позже */ }
-      }
-    });
+    } else {
+      diag.peerServer = 'fail';
+    }
+    if (peer) {
+      peer.on('open', () => {
+        if (closed) return;
+        const first = diag.peerServer !== 'ok';
+        diag.peerServer = 'ok';
+        netLog.add(`p2p: сервер ${PEER_OPTS.host || '0.peerjs.com'} ответил`);
+        if (first && role === 'guest') attach(peer.connect(PEER_PREFIX + code, { serialization: 'raw' }));
+        done();
+      });
+      peer.on('connection', (conn) => {
+        if (role === 'host') attach(conn);
+        else conn.close();
+      });
+      peer.on('error', (err) => {
+        const type = errType(err);
+        netLog.add(`p2p: ошибка ${type} ${errMsg(err)}`);
+        if (type === 'peer-unavailable') {
+          diag.peerUnavailable = true;
+          return;
+        }
+        if (type === 'unavailable-id' && !settled) {
+          giveUp({ type }); // код занят — создадим игру с другим кодом
+          return;
+        }
+        if (['webrtc'].includes(type)) return;
+        if (diag.peerServer !== 'ok') {
+          diag.peerServer = 'fail';
+          diag.peerErr = { type };
+          checkAllFailed();
+        }
+      });
+      peer.on('disconnected', () => {
+        netLog.add(`p2p: связь с сервером ${closed ? 'закрыта' : 'потеряна, переподключаемся'}`);
+        if (!closed) {
+          setTimeout(() => {
+            try { if (!closed && peer.disconnected) peer.reconnect(); } catch (e) { /* попробуем позже */ }
+          }, 1000);
+        }
+      });
+    }
+
+    // --- путь 2: серверы-посредники (MQTT over WSS) ---
+    if (window.mqtt) {
+      RELAY_URLS.forEach((url, i) => {
+        let client;
+        try {
+          client = window.mqtt.connect(url, {
+            clientId: `sv_${cid}_${i}`,
+            clean: true,
+            keepalive: 20,
+            connectTimeout: 8000,
+            reconnectPeriod: 3000,
+          });
+        } catch (e) {
+          diag.relays[i] = 'fail';
+          netLog.add(`relay${i + 1}: не удалось создать клиент ${errMsg(e)}`);
+          checkAllFailed();
+          return;
+        }
+        relays.push(client);
+        const host = url.replace(/^wss?:\/\//, '').replace(/\/.*$/, '');
+        let failures = 0;
+        client.on('connect', () => {
+          if (closed) return;
+          diag.relays[i] = 'ok';
+          failures = 0;
+          netLog.add(`relay${i + 1}: ${host} подключён`);
+          client.subscribe(`${topicBase}/+`, { qos: 0 });
+          flush();
+          done();
+        });
+        client.on('message', (topic, payload) => receive(payload, 'relay'));
+        const bad = (why) => {
+          if (closed) return;
+          failures++;
+          if (failures === 1 || failures % 10 === 0) netLog.add(`relay${i + 1}: ${host} ${why}`);
+          if (diag.relays[i] !== 'ok') {
+            diag.relays[i] = 'fail';
+            checkAllFailed();
+          }
+        };
+        client.on('error', (e) => bad(`ошибка ${errMsg(e) || errType(e)}`));
+        client.on('offline', () => bad('недоступен'));
+        client.on('close', () => {
+          if (!closed && diag.relays[i] === 'ok') {
+            diag.relays[i] = 'connecting';
+            netLog.add(`relay${i + 1}: ${host} отключился, переподключаемся`);
+          }
+        });
+      });
+    } else {
+      diag.relays = diag.relays.map(() => 'fail');
+      netLog.add('relay: библиотека MQTT не загружена — только прямое соединение');
+    }
+    checkAllFailed();
   });
 }
 
 const p2pLobby = {
   p2p: true,
-  join: p2pJoin,
+  join: onlineJoin,
   presence: () => Promise.resolve(),
   peers: () => [],
   onPeers: () => () => {},
@@ -1286,19 +1432,16 @@ const net = {
       room.onPeers(() => this.renderLobby(), () => $('onlineBtn').classList.add('hidden'));
       return;
     }
-    try {
-      await loadScript(PEERJS_URL);
-    } catch (e) {
-      netLog.add('не удалось загрузить PeerJS с cdnjs — онлайн недоступен');
-      return;
-    }
-    if (!window.Peer) return;
+    const libs = await Promise.allSettled([loadScript(PEERJS_URL), loadScript(MQTT_URL)]);
     netLog.env();
+    if (libs[0].status !== 'fulfilled') netLog.add('не удалось загрузить PeerJS — прямое соединение недоступно');
+    if (libs[1].status !== 'fulfilled') netLog.add('не удалось загрузить MQTT — сервер-посредник недоступен');
+    if (!window.Peer && !window.mqtt) return;
     this.room = p2pLobby;
     $('onlineBtn').classList.remove('hidden');
     $('gameList').classList.add('hidden');
     $('joinHint').textContent = 'Или введите код друга:';
-    $('onlineHint').textContent = 'Создайте игру и отправьте другу ссылку или код. Лучше играть через Wi-Fi.';
+    $('onlineHint').textContent = 'Создайте игру и отправьте другу ссылку или код.';
 
     const params = new URLSearchParams(location.search);
     const join = params.get('join');
@@ -1329,7 +1472,19 @@ const net = {
     $('onlineError').textContent = text;
   },
 
-  // Ошибка PeerJS -> код и понятный текст (коды — в ERRORS и README)
+  // Гость не дождался создателя: по диагностике понимаем почему
+  guestTimeoutText(code) {
+    const d = this.chan && this.chan.diag;
+    if (!d) return this.errorText({ type: 'peer-unavailable' }, code);
+    const relayOk = d.relays.includes('ok');
+    if (d.ice === 'failed' && !relayOk) {
+      netLog.add('итог: NET-P2P + NET-RELAY');
+      return `${ERRORS['NET-P2P'].text} ${ERRORS['NET-RELAY'].text} Код ошибки: NET-P2P + NET-RELAY.`;
+    }
+    return this.errorText({ type: 'peer-unavailable' }, code);
+  },
+
+  // Ошибка подключения -> код и понятный текст (коды — в ERRORS и README)
   errorText(err, code) {
     const type = errType(err);
     let key = 'NET-UNKNOWN';
@@ -1337,7 +1492,7 @@ const net = {
     else if (type === 'unavailable-id') key = 'NET-409';
     else if (type === 'browser-incompatible') key = 'NET-BROWSER';
     else if (type === 'ice-failed') key = 'NET-P2P';
-    else if (type === 'timeout') key = err.stage === 'p2p' ? 'NET-P2P' : 'NET-SRV-TIMEOUT';
+    else if (type === 'timeout') key = 'NET-SRV-TIMEOUT';
     else if (['network', 'socket-error', 'socket-closed', 'server-error', 'ssl-unavailable'].includes(type)) key = 'NET-SRV';
     else if (type === 'webrtc') key = 'NET-RTC';
     const text = ERRORS[key].text
@@ -1532,10 +1687,10 @@ const net = {
     clearTimeout(this.joinTimer);
     this.joinTimer = setTimeout(() => {
       if (game.mode === 'guest' && !this.hostPeer) {
-        netLog.add('guest: создатель не появился за 8 секунд');
-        this.onlineError(this.errorText({ type: 'peer-unavailable' }, code));
+        netLog.add('guest: создатель не появился за 10 секунд');
+        this.onlineError(this.guestTimeoutText(code));
       }
-    }, 8000);
+    }, 10000);
   },
 
   guestPeers() {

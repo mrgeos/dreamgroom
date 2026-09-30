@@ -11,10 +11,12 @@ Plain HTML5 Canvas + JavaScript, no dependencies and no build step.
   4-letter code plus an invite link; the friend opens the link or enters the code.
   Anyone else who joins with the same code watches. The creator's phone runs the
   physics; the opponent's phone sends only its controls.
-  - On a regular website (GitHub Pages) phones connect directly over WebRTC.
-    PeerJS's free public server (`0.peerjs.com`) is used only to find each other.
-    No account needed. On some mobile networks a direct connection may fail;
-    Wi-Fi usually works.
+  - On a regular website (GitHub Pages) the game uses two paths at once:
+    a direct WebRTC connection (PeerJS, `0.peerjs.com` is used only to find each
+    other) and a relay through free public MQTT brokers (`broker.hivemq.com`,
+    `broker.emqx.io`). Every message carries a sequence number and goes over all
+    live paths; the receiver keeps the newest, so the faster path wins by itself.
+    When mobile networks block the direct connection, the relay keeps the game going.
   - Opened as a page on claude.ai, it uses the page's `room` capability instead
     and also lists open games.
 - The phone is held in landscape.
@@ -36,9 +38,10 @@ When a connection fails, the game shows a code, and the online screen has a
 | --- | --- |
 | `NET-404` | No game with this code (wrong code, or the creator closed the game). |
 | `NET-409` | Could not reserve a game code on the server. |
-| `NET-SRV` | No connection to the PeerJS server (no internet, or the network/VPN blocks `0.peerjs.com`). |
-| `NET-SRV-TIMEOUT` | The PeerJS server did not answer within 20 seconds. |
-| `NET-P2P` | The game was found, but the phones could not connect directly (common on mobile data; Wi-Fi helps). |
+| `NET-SRV` | None of the game servers answer (PeerJS and both brokers): no internet, or the network/VPN blocks them. |
+| `NET-SRV-TIMEOUT` | The servers did not answer within 15 seconds. |
+| `NET-P2P` | The phones could not connect directly. Only shown together with `NET-RELAY`, because otherwise the relay is used. |
+| `NET-RELAY` | The relay brokers (HiveMQ, EMQX) are unreachable too. |
 | `NET-RTC` | WebRTC error in the browser (e.g. a messenger's built-in browser). |
 | `NET-BROWSER` | The browser does not support WebRTC. |
 | `NET-LOST` | The connection to the game creator was lost. |
